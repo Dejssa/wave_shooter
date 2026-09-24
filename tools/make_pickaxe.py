@@ -66,22 +66,22 @@ def box_ring(y, hx, hz):
 loft([box_ring(*c) for c in collar], [V3(0, c[0], 0) for c in collar], lambda k, i: 'PickSteel')
 
 def arm(direction, length, sweep, half_x, half_y, point, edge_from):
-    """an arm of the head along ±Z: rectangular sections that taper and sweep up"""
+    """an arm of the head along ±Z: rectangular sections that taper and curve back toward the grip"""
     t = np.linspace(0, 1, len(half_x))
     rings, centres = [], []
     for s, hx, hy in zip(t, half_x, half_y):
-        c = V3(0, HY + sweep * s ** 1.6, direction * (0.028 + length * s))
+        c = V3(0, HY - sweep * s ** 1.6, direction * (0.028 + length * s))
         rings.append([c + V3(-hx, -hy, 0), c + V3(hx, -hy, 0), c + V3(hx, hy, 0), c + V3(-hx, hy, 0)])
         centres.append(c)
     last = len(rings) - 1
     pick = lambda k, i: 'PickEdge' if k >= edge_from else 'PickSteel'
     if point:                                   # finish in a sharp point
-        tip = centres[-1] + V3(0, sweep * 0.08, direction * 0.03)
+        tip = centres[-1] + V3(0, -sweep * 0.08, direction * 0.03)
         loft(rings, centres, pick, cap0=False, cap1=False)
         for i in range(4):
             tri('PickEdge', rings[-1][i], rings[-1][(i + 1) % 4], tip, centres[-1])
     else:                                       # finish in a straight chisel edge
-        e = centres[-1] + V3(0, sweep * 0.05, direction * 0.02)
+        e = centres[-1] + V3(0, -sweep * 0.05, direction * 0.02)
         ea, eb = e + V3(-half_x[-1] * 1.05, 0, 0), e + V3(half_x[-1] * 1.05, 0, 0)
         loft(rings, centres, pick, cap0=False, cap1=False)
         r = rings[-1]
@@ -89,10 +89,10 @@ def arm(direction, length, sweep, half_x, half_y, point, edge_from):
         tri('PickEdge', r[3], r[2], eb, centres[-1]); tri('PickEdge', r[3], eb, ea, centres[-1])   # upper bevel
         tri('PickEdge', r[0], ea, r[3], centres[-1]); tri('PickEdge', r[1], eb, r[2], centres[-1])  # ends
 
-# pick: long, tapering to a point, curving up
-arm(+1, 0.235, 0.028, [0.014, 0.013, 0.011, 0.008, 0.005], [0.030, 0.024, 0.018, 0.012, 0.007], True, 4)
+# pick: long, tapering to a point, curving back toward the grip
+arm(+1, 0.235, 0.034, [0.014, 0.013, 0.011, 0.008, 0.005], [0.030, 0.024, 0.018, 0.012, 0.007], True, 4)
 # chisel blade: shorter, widening and thinning to a flat edge
-arm(-1, 0.20, 0.022, [0.014, 0.016, 0.019, 0.022], [0.030, 0.021, 0.013, 0.006], False, 3)
+arm(-1, 0.20, 0.026, [0.014, 0.016, 0.019, 0.022], [0.030, 0.021, 0.013, 0.006], False, 3)
 
 # ---------------------------------------------------------------- write glTF
 g = GLTF2(asset=Asset(generator='tools/make_pickaxe.py'))
