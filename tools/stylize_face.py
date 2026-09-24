@@ -10,6 +10,8 @@ then:  npx @gltf-transform/cli prune OUT.glb OUT.glb  (drops unused data)
 """
 import sys
 import numpy as np
+import sys
+import numpy as np
 from pygltflib import GLTF2, Material, PbrMetallicRoughness, Primitive, Attributes, Accessor, BufferView
 SRC,DST=sys.argv[1],sys.argv[2]
 from pygltflib import GLTF2
@@ -114,14 +116,16 @@ def flat(tris):
     V[flip]=V[flip][:,[0,2,1]]; n[flip]*=-1
     return V.reshape(-1,3),np.repeat(n,3,axis=0)
 
-def strip(top,bot,depth):
+def strip(top,bot,depth,walls=(True,True)):
     """front faces between two polylines + side walls sinking into the face"""
     tris=[]
     for i in range(len(top)-1):
         a,b,c,d=top[i],top[i+1],bot[i+1],bot[i]
         tris+= [(a,b,c),(a,c,d)]
     back=lambda v: v+np.array([0,0,depth])
-    for line in (top,bot):
+    if not any(walls): return tris
+    for line,on in zip((top,bot),walls):
+        if not on: continue
         for i in range(len(line)-1):
             a,b=line[i],line[i+1]; tris+=[(a,back(a),back(b)),(a,back(b),b)]
     for a,d in ((top[0],bot[0]),(top[-1],bot[-1])):
@@ -132,7 +136,7 @@ def brow(side):
     # inner -> arch -> tapered tail (x,y,thickness)
     ctrl=np.array([[0.012,1.6875,0.0060],[0.022,1.6925,0.0062],[0.034,1.6965,0.0056],
                    [0.044,1.6965,0.0046],[0.052,1.6935,0.0032],[0.059,1.6885,0.0012]])
-    t=np.linspace(0,1,9); k=np.linspace(0,1,len(ctrl))
+    t=np.linspace(0,1,5); k=np.linspace(0,1,len(ctrl))
     c=np.stack([np.interp(t,k,ctrl[:,j]) for j in range(3)],1)
     tan=np.gradient(c[:,:2],axis=0); tan/=np.linalg.norm(tan,axis=1,keepdims=True)
     nrm=np.stack([-tan[:,1],tan[:,0]],1); nrm*=np.sign(nrm[:,1:2])
@@ -147,7 +151,7 @@ def eye(side):
     zs=surf([(cx,cy)])[0]
     rx,ry,rz=0.0098,0.0120,0.0060
     c=np.array([cx,cy,zs+0.0008])
-    nu,nv=12,5
+    nu,nv=8,2
     V=[];N=[]
     for j in range(nv+1):
         th=(np.pi/2)*j/nv            # 0 = front pole
@@ -169,11 +173,11 @@ def eye(side):
     hx,hy=-0.0042,0.0048
     u,v=hx/rx,hy/ry; hz=c[2]-rz*np.sqrt(max(0,1-u*u-v*v))-0.0004
     hc=np.array([cx+hx,cy+hy,hz]); r=0.0022
-    ring=[hc+[r*np.cos(a),r*1.15*np.sin(a),0.0003*np.cos(a)] for a in np.linspace(0,2*np.pi,7)[:-1]]
-    shine=[(hc,ring[i],ring[(i+1)%6]) for i in range(6)]
+    ring=[hc+[r*np.cos(a),r*1.15*np.sin(a),0.0003*np.cos(a)] for a in np.linspace(0,2*np.pi,5)[:-1]]
+    shine=[(ring[0],ring[1],ring[2]),(ring[0],ring[2],ring[3])]
     # small lash flick at the outer-upper corner (feminine cue, same block language as the brows)
     base=[]
-    for a in np.linspace(np.radians(40),np.radians(10),4):
+    for a in np.linspace(np.radians(40),np.radians(10),2):
         base.append(np.array([cx+side*rx*1.05*np.cos(a),cy+ry*1.05*np.sin(a)]))
     tip=np.array([cx+side*(rx+0.0055),cy+ry*0.55])
     inner=[b+(np.array([cx,cy])-b)*0.18 for b in base]
@@ -182,11 +186,11 @@ def eye(side):
     bot=[np.array([*b,0]) for b in inner]+[np.array([*tip,0])]
     top=np.array(top);bot=np.array(bot)
     top[:,2]=surf(top[:,:2])-0.0022; bot[:,2]=surf(bot[:,:2])-0.0022
-    lash=strip(list(top),list(bot),0.003)
+    lash=strip(list(top),list(bot),0.003,(True,False))
     return (V,N,np.array(idx)),shine,lash
 
 def lips():
-    xs=np.linspace(-0.019,0.019,13); ax=np.abs(xs)
+    xs=np.array([-0.019,-0.011,-0.004,0,0.004,0.011,0.019]); ax=np.abs(xs)
     line=1.5932-0.0008*(1-(ax/0.019)**2)                 # mouth line, slight downward centre
     bow=np.where(ax<0.004,1.5992-0.0012*(1-ax/0.004),0)  # cupid's bow dip
     up=np.where(ax<0.004,bow,1.6000-0.0068*(np.clip(ax-0.004,0,None)/0.015)**1.6)
@@ -197,11 +201,11 @@ def lips():
     prot_l=0.0042*(1-(ax/0.019)**2)+0.0003
     U0=row(up,0.0006+0*ax); U1=row((up+line)/2,prot_u); U2=row(line+0.0002,prot_u*0.55)
     L0=row(line-0.0002,prot_l*0.55); L1=row((lo+line)/2+0.0006,prot_l); L2=row(lo,0.0006+0*ax)
-    upper=strip(list(U0),list(U1),0.003)+strip(list(U1),list(U2),0.003)
-    lower=strip(list(L0),list(L1),0.003)+strip(list(L1),list(L2),0.003)
+    upper=strip(list(U0),list(U1),0.003,(True,False))+strip(list(U1),list(U2),0.003,(False,False))
+    lower=strip(list(L0),list(L1),0.003,(False,False))+strip(list(L1),list(L2),0.003,(False,True))
     # dark mouth line tucked between the lips
     M0=row(line+0.0005,prot_u*0.3); M1=row(line-0.0005,prot_l*0.3)
-    mline=strip(list(M0),list(M1),0.002)
+    mline=strip(list(M0[::2]),list(M1[::2]),0.002,(False,False))
     return upper+lower,mline
 
 # ------------------------------------------------------------------ assemble
