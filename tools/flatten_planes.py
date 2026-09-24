@@ -1,12 +1,14 @@
-"""Make each cheek of human_female.glb a single flat polygon.
+"""Turn facial areas of human_female.glb into single flat polygons.
 
-Picks the front-facing cheek (nose side to cheekbone, lip corner to under the
-eye), flattens its outline onto a best-fit plane (a few mm at most), and refills
-it with coplanar triangles so it reads as one facet. Nearby skin below the eyes
-eases along so no folds appear, and the mouth plug corners follow the cheek.
-Run on the output of decimate.py.
+Patches: each cheek (nose side to cheekbone, lip corner to under the eye), each
+side of the jaw (chin corner up to below the ear), the underside of each
+jawline, and the front of the chin. Every patch outline is moved onto its
+best-fit plane (a corner shared by two patches goes to the point closest to
+both planes) and the patch is refilled with coplanar triangles, so it reads as
+one facet. Skin just around the patches eases along so nothing folds, and the
+mouth plug corners follow. Run on the output of decimate.py.
 
-Usage: python tools/flatten_cheeks.py IN.glb OUT.glb   (needs numpy, pygltflib)
+Usage: python tools/flatten_planes.py IN.glb OUT.glb   (needs numpy, pygltflib)
 then:  npx @gltf-transform/cli prune OUT.glb OUT.glb
 """
 import sys
@@ -42,7 +44,9 @@ def boundary_loop(T):
             a,b=t[i],t[(i+1)%3]
             if E[tuple(sorted((a,b)))]==1: nxt[a]=b
     start=next(iter(nxt)); loop=[start]
-    while nxt[loop[-1]]!=start: loop.append(nxt[loop[-1]])
+    while nxt[loop[-1]]!=start:
+        loop.append(nxt[loop[-1]])
+        assert len(loop)<=len(nxt),'patch outline is not a simple loop'
     assert len(loop)==len(nxt),'cheek region has holes or several pieces'
     return loop
 
@@ -82,28 +86,68 @@ N0=acc(g,p.attributes.NORMAL); UV=acc(g,p.attributes.TEXCOORD_0) if p.attributes
 _,first,inv=np.unique(np.round(P,5),axis=0,return_index=True,return_inverse=True); inv=inv.ravel()
 wP=P[first].copy()
 T=inv[I].reshape(-1,3); corner=I.reshape(-1,3)       # welded ids / original corner ids
-keep=np.ones(len(T),bool); newtris=[]
-for side in (1,-1):
-    # front-facing cheek: every corner between the nose side and the cheekbone,
-    # the lip corner and the under-eye row (the side of the face turns ~50 deg away)
-    X=wP[T][...,0]*side; Y=wP[T][...,1]; Z=wP[T][...,2]
-    fn=np.cross(wP[T[:,1]]-wP[T[:,0]],wP[T[:,2]]-wP[T[:,0]])
-    sel=((X>0.014)&(X<0.057)&(Y>1.588)&(Y<1.648)&(Z<-0.07)).all(1)&(fn[:,2]<0)
-    loop=boundary_loop(T[sel])
-    B=wP[loop]
-    # best-fit plane of the whole cheek, then flatten its outline onto it
-    c0=B.mean(0)
-    n=np.linalg.svd(B-c0)[2][2]; n*=-np.sign(n[2]) if n[2]>0 else 1
-    d=(B-c0)@n; wP[loop]=B-np.outer(d,n)
-    u=np.cross(n,[0,1,0]); u/=np.linalg.norm(u); v=np.cross(n,u)
+fn0=np.cross(wP[T[:,1]]-wP[T[:,0]],wP[T[:,2]]-wP[T[:,0]]); fn0/=np.linalg.norm(fn0,axis=1,keepdims=True)
+def patches():
+    """name -> triangle mask. Coordinates are the rest pose; +x is the character's right."""
+    out={}
+    X=wP[T][...,0]; Y=wP[T][...,1]; Z=wP[T][...,2]
+    chin0=(((np.abs(X)<0.017)&(Y>1.5555)&(Y<1.582)&(Z<-0.084)).all(1)&(fn0[:,1]>-0.95)).astype(int)
+    for side,tag in ((1,'R'),(-1,'L')):
+        X=wP[T][...,0]*side; Y=wP[T][...,1]; Z=wP[T][...,2]; nx=fn0[:,0]*side
+        # front-facing cheek: nose side to cheekbone, lip corner to under the eye
+        out['cheek'+tag]=((X>0.014)&(X<0.057)&(Y>1.588)&(Y<1.648)&(Z<-0.07)).all(1)&(fn0[:,2]<0)
+        # side of the jaw: chin corner up to below the ear
+        out['jaw'+tag]=((X>0.045)&(X<0.08)&(Y>1.585)&(Y<1.661)&(Z>-0.06)&(Z<0.03)).all(1)&(nx>0.75)&(fn0[:,2]>-0.25)
+        # underside of the jawline, chin corner back to the neck
+        out['underjaw'+tag]=((X>0.004)&(X<0.06)&(Y>1.565)&(Y<1.594)&(Z>-0.095)&(Z<-0.02)).all(1)&(fn0[:,1]<-0.7)
+    X=wP[T][...,0]; Y=wP[T][...,1]; Z=wP[T][...,2]
+    # front of the chin, below the mouth (the flat underside stays as it is)
+    out['chin']=chin0==1
+    return out
+
+P0=wP.copy(); keep=np.ones(len(T),bool); planes=[]
+for name,sel in patches().items():
+    assert sel.any() and not (sel&~keep).any(), name
+    loop=boundary_loop(T[sel]); B=P0[loop]
+    c0=B.mean(0); n=np.linalg.svd(B-c0)[2][2]; n*=np.sign(n@(B.mean(0)-np.array([0,1.66,0])))
+    planes.append((name,sel,loop,c0,n)); keep&=~sel
+# flatten every outline: each corner goes to the point closest to all planes it
+# touches, with a small pull toward where it was so corners shared by nearly
+# parallel planes don't run off
+LAM=0.02
+LAM_SHARED=0.02
+M={}; R={}
+for name,sel,loop,c0,n in planes:
+    for v in loop:
+        M[v]=M.get(v,LAM*np.eye(3))+np.outer(n,n)
+        R[v]=R.get(v,LAM*P0[v])+n*(n@c0)
+cnt={}
+for name,sel,loop,c0,n in planes:
+    for v in loop: cnt[v]=cnt.get(v,0)+1
+for v in M:
+    extra=0.0 if cnt[v]==1 else LAM_SHARED   # stiffer where several planes meet
+    wP[v]=np.linalg.solve(M[v]+extra*np.eye(3),R[v]+extra*P0[v])
+outline=np.unique(np.concatenate([l for _,_,l,_,_ in planes]))
+D=wP-P0
+# ease nearby skin along so the surrounding planes don't fold
+# (not under the eyes, brows or lips, which sit on the surface)
+inpatch=np.zeros(len(wP),bool); inpatch[np.unique(T[~keep])]=True
+ring=np.setdiff1d(np.unique(T[np.isin(T,outline).any(1)]),np.where(inpatch)[0])
+ring=ring[(P0[ring,1]<1.650)&~((np.abs(P0[ring,0])<0.024)&(P0[ring,1]<1.606)&(P0[ring,2]<-0.08))]
+for r in ring:
+    dist=np.linalg.norm(P0[outline]-P0[r],axis=1); j=dist.argmin()
+    wP[r]+=max(0,1-dist[j]/0.022)*0.6*D[outline[j]]
+newtris=[]
+for name,sel,loop,c0,n in planes:
+    u=np.cross(n,[0,1,0]) if abs(n[1])<0.9 else np.cross(n,[1,0,0]); u/=np.linalg.norm(u); v=np.cross(n,u)
     P2=np.c_[(wP[loop]-c0)@u,(wP[loop]-c0)@v]
     tris=[(loop[a],loop[b],loop[c]) for a,b,c in earclip(P2)]
-    # keep the winding of the removed faces (outward)
     t0=np.array(tris[0]); f0=np.cross(wP[t0[1]]-wP[t0[0]],wP[t0[2]]-wP[t0[0]])
     if f0@n<0: tris=[(a,c,b) for a,b,c in tris]
-    keep&=~sel; newtris+=tris
-    print(f'side {side:+d}: {sel.sum()} tris -> 1 polygon ({len(loop)} corners, {len(tris)} tris); '
-          f'outline moved max {np.abs(d).max()*1000:.1f} mm')
+    newtris+=tris
+    res=np.abs((wP[loop]-c0)@n).max()*1000
+    print(f'flat within {res:3.1f} mm | ',end='')
+    print(f'{name:10s} {sel.sum():2d} tris -> 1 polygon ({len(loop)} corners); outline moved max {np.linalg.norm(D[loop],axis=1).max()*1000:.1f} mm')
 
 # rebuild the primitive: flat-shaded, per-corner attributes from the welded source vertex
 allT=np.vstack([T[keep],np.array(newtris)])
